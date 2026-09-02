@@ -8,9 +8,9 @@ GTK3/Vala Hello World! и понятный путь к Greeter с Meson и те�
 
 ## Архитектура
 
-- **Herdr** — runtime и наблюдатель терминальных и агентских сессий.
-- **Pi** — coding agent, с которым работают в терминале.
-- **pi-extensible-workflows** — детерминированный оркестратор workflows.
+- [**Herdr**](https://herdr.dev/docs/quick-start/) — runtime и наблюдатель терминальных и агентских сессий.
+- [**Pi**](https://pi.dev/) — coding agent, с которым работают в терминале.
+- [**pi-extensible-workflows**](https://vekexasia.github.io/pi-extensible-workflows/developers.html) — детерминированный оркестратор workflows.
 - **`@piewf/herdr`** — связывает workflow-agent sessions с Herdr.
 
 ## Доверие и безопасность
