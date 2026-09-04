@@ -1,5 +1,25 @@
 # Herdr + Pi + pi-extensible-workflows: GTK3/Vala с нуля
 
+## Оглавление
+
+- [Для кого и результат](#для-кого-и-результат)
+- [Архитектура](#архитектура)
+- [Доверие и безопасность](#доверие-и-безопасность)
+- [Требования](#требования)
+- [Установка и первый запуск Pi](#установка-и-первый-запуск-pi)
+- [Установка Herdr и Pi-интеграции](#установка-herdr-и-pi-интеграции)
+- [Установка workflow-пакетов](#установка-workflow-пакетов)
+- [Основы настройки Pi](#основы-настройки-pi)
+- [Базовый проект и запуск сессии](#базовый-проект-и-запуск-сессии)
+- [Простой пример: Hello World](#простой-пример-hello-world)
+- [Продвинутый пример: Greeter с оркестрацией](#продвинутый-пример-greeter-с-оркестрацией)
+- [Ручное тестирование и обратная связь](#ручное-тестирование-и-обратная-связь)
+- [Каталог команд](#каталог-команд)
+- [Аналогия с OpenCode](#аналогия-с-opencode)
+- [Устранение неполадок](#устранение-неполадок)
+- [Обновление и очистка](#обновление-и-очистка)
+- [Источники](#источники)
+
 ## Для кого и результат
 
 Руководство предназначено для Linux-разработчиков, которые хотят создавать и
@@ -8,16 +28,22 @@ GTK3/Vala Hello World! и понятный путь к Greeter с Meson и те�
 
 ## Архитектура
 
-- [**Herdr**](https://herdr.dev/docs/quick-start/) — runtime и наблюдатель терминальных и агентских сессий.
-- [**Pi**](https://pi.dev/) — coding agent, с которым работают в терминале.
-- [**pi-extensible-workflows**](https://vekexasia.github.io/pi-extensible-workflows/developers.html) — детерминированный оркестратор workflows.
+- **Herdr** — runtime и наблюдатель терминальных и агентских сессий.
+- **Pi** — coding agent, с которым работают в терминале.
+- **pi-extensible-workflows** — детерминированный оркестратор workflows.
 - **`@piewf/herdr`** — связывает workflow-agent sessions с Herdr.
+
+Pi следует минималистичной модели: базовый coding agent предоставляет `read`,
+`write`, `edit` и `bash`, а workflows и subagents добавляются доверенными
+расширениями и пакетами.
 
 ## Доверие и безопасность
 
 Pi-пакеты и расширения выполняются с правами вашего пользователя к файловой
 системе и процессам. Устанавливайте только доверенный код и проверяйте источник
 проекта и пакета. Не помещайте API-ключи, токены и другие секреты в репозиторий.
+Проверки разрешений могут предоставляться расширением, но не являются
+автоматической гарантией изоляции.
 
 ## Требования
 
@@ -101,6 +127,23 @@ herdr integration status
 Она записывает `~/.pi/agent/extensions/herdr-agent-state.ts`, либо
 эквивалентный путь при заданном `PI_CODING_AGENT_DIR`.
 
+### Размер панелей Herdr
+
+Границу split можно перетаскивать мышью. Ctrl+B, затем R включает resize:
+H/L меняют ширину, J/K — высоту; стрелки также работают, а Esc или Enter
+завершает режим. Изменяется только split ratio, поэтому при одной панели,
+отсутствующей подходящей границе, минимальном размере или zoom изменения могут
+быть не видны. Ctrl+B, затем Z переключает zoom; Ctrl+B, затем V создаёт split
+справа, Ctrl+B, затем минус — split снизу. Размер всего таба определяется
+локальным окном терминала, в том числе размером SSH PTY.
+
+Для диагностики внутри Herdr:
+
+```bash
+herdr pane layout --current
+herdr pane resize --direction right --amount 0.1 --current
+```
+
 ## Установка workflow-пакетов
 
 Следующие команды являются командами CLI в **обычной оболочке**, а не текстом
@@ -128,6 +171,49 @@ pi install npm:@piewf/herdr
 }
 ```
 
+## Основы настройки Pi
+
+| Сущность | Назначение |
+| --- | --- |
+| Prompt template | Markdown, разворачиваемый в slash-команду. |
+| Skill | Инструкция/capability по требованию: `/skill:name`. |
+| Extension | TypeScript host-код: tools, UI, events, права пользователя. |
+| Theme | Только внешний вид TUI. |
+| Package | Набор extensions, skills, prompts и themes. |
+
+Глобальные templates находятся в `~/.pi/agent/prompts/*.md`, а templates
+доверенного проекта — в `.pi/prompts/*.md`. Extension — доверенный код с
+правами пользователя. Package устанавливается через `pi install`.
+
+Выбор модели выполняется через `/model` или Ctrl+L; Ctrl+S в selector сохраняет
+выбор как default. `/thinking` или Shift+Tab меняет reasoning, а `/login` нужен,
+если provider ещё не настроен. Новый bundled workflow обычно разрешает aliases
+developer/reviewer из модели запустившего Pi, если settings не переопределяют
+aliases. Уже работающий workflow использует snapshot на момент запуска.
+
+Пример project-local template `.pi/prompts/gtk-review.md`:
+
+```text
+---
+description: Проверить GTK3/Vala-изменения
+argument-hint: "[область проверки]"
+---
+Проверь GTK3/Vala-изменения в текущем проекте.
+Особое внимание удели:
+${@:-общей корректности, тестируемой не-GUI логике и Meson-тестам}.
+```
+
+После доверия проекту Pi загружает его context. После изменения template или
+`AGENTS.md` выполните `/reload` либо перезапустите Pi. Вызовы шаблона:
+
+```text
+/gtk-review
+/gtk-review обработка пустого ввода
+```
+
+`/review-loop` использует тот же механизм Pi prompt template, но поставляется
+пакетом и вызывает `workflow`/`reviewLoop`.
+
 ## Базовый проект и запуск сессии
 
 Это руководство не обязано находиться в демонстрационном проекте. Создайте
@@ -140,7 +226,14 @@ cd ~/src/gtk3-vala-herdr-demo
 git init
 printf '# GTK3 Vala demo\n' > README.md
 printf 'build/\nhello-world\ngtk3-greeter\n' > .gitignore
-git add README.md .gitignore
+cat > AGENTS.md <<'EOF'
+# Project instructions
+
+- Use GTK3, not GTK4.
+- Keep non-GUI logic testable.
+- Run the documented build and test commands.
+EOF
+git add README.md .gitignore AGENTS.md
 git commit -m "chore: initialize project"
 ```
 
@@ -201,9 +294,7 @@ valac --pkg gtk+-3.0 -o hello-world main.vala
 ```
 
 Ожидается GTK-окно с текстом `Hello World!`. Это ожидаемый результат, а не
-заявление, что GUI был запущен данным руководством. `/review-loop` не встроена
-в Pi: это prompt template `pi-extensible-workflows`, вызывающий инструмент
-`workflow` и зарегистрированный `reviewLoop`.
+заявление, что GUI был запущен данным руководством.
 
 ## Продвинутый пример: Greeter с оркестрацией
 
@@ -255,6 +346,32 @@ valac --pkg gtk+-3.0 -o hello-world main.vala
    /workflow
    /workflow trajectory
    ```
+
+### Удалённая Trajectory через SSH
+
+Если Pi на удалённой машине вывел следующее, это URL Trajectory, а не адрес SSH:
+
+```text
+Trajectory opened at http://127.0.0.1:8190/
+```
+
+На **локальной** машине создайте туннель. Порт 8190 — порт Trajectory, а не
+обязательно порт SSH-сервера:
+
+```bash
+ssh -N \
+  -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:8190:127.0.0.1:8190 \
+  user@remote-host
+```
+
+Откройте локально <http://127.0.0.1:8190/>. Если SSH-сервер использует иной
+порт, добавьте к команде параметр `-p <ssh-port>`. Если Pi вывел другой порт,
+замените 8190 согласованно в обеих сторонах forwarding и URL.
+
+Trajectory-server привязан только к remote loopback (`127.0.0.1`); не
+выставляйте его на `0.0.0.0`. У Trajectory нет собственной аутентификации или
+TLS: аутентификацию и шифрование обеспечивает SSH.
 
 После оркестрации выполните ручную shell-проверку. `meson setup build` нужен
 только при первом создании build-каталога. Повторяйте setup с `--wipe` лишь
@@ -322,11 +439,26 @@ workflow нельзя дополнить: начните новый run. Для 
 
 ## Каталог команд
 
-### Встроенные Pi
+### Операции Pi
 
-Примеры: `/login`, `/model`, `/thinking`, `/new`, `/resume`, `/tree`, `/fork`,
-`/clone`, `/compact`, `/reload`, `/export`, `/import`, `/share`, `/quit`.
-Фактический список покажет `/`.
+Настройка `/model`, `/login` и `/thinking` описана в «Основы настройки Pi».
+
+| Команда | Действие |
+| --- | --- |
+| `/name` | Задать имя текущей сессии. |
+| `/session` | Показать файл, ID, сообщения, токены и стоимость сессии. |
+| `/resume` | Продолжить предыдущую сессию. |
+| `/new` | Создать новую сессию. |
+| `/tree` | Показать ветвление в той же сессии. |
+| `/fork` | Создать новую сессию от раннего user message. |
+| `/clone` | Дублировать активную ветку в новую сессию. |
+| `/compact` | Сжать контекст в summary. |
+| `/reload` | Перезагрузить project-local настройки и extensions. |
+| `/export` | Экспортировать сессию в HTML. |
+| `/share` | Создать private GitHub gist. |
+| `/quit` | Выйти из Pi. |
+
+Введите `/`, чтобы увидеть фактический список команд установленной версии.
 
 ### Prompt-команды пакета
 
@@ -381,6 +513,14 @@ workflow нельзя дополнить: начните новый run. Для 
   run. Не используйте выдуманное `/workflow resume`: `/workflow` — picker;
   документированная специальная форма — `/workflow trajectory`.
 
+### Редактор показывает NORMAL
+
+`NORMAL` означает Vim-style editor extension или custom editor, а не статус
+workflow и не гарантированное поведение stock Pi. Нажмите i для режима INSERT,
+введите slash-команду и нажмите Enter; Esc возвращает NORMAL. Если такой editor
+не нужен, выполните `pi config` в обычной оболочке, найдите и отключите
+соответствующее расширение, затем перезапустите Pi.
+
 ## Обновление и очистка
 
 ```bash
@@ -403,8 +543,18 @@ herdr server stop
 ## Источники
 
 - Pi: <https://pi.dev/docs/latest>
+- Pi prompt templates: <https://pi.dev/docs/latest/prompt-templates>
+- Pi sessions: <https://pi.dev/docs/latest/sessions>
+- Pi skills: <https://pi.dev/docs/latest/skills>
+- Pi themes: <https://pi.dev/docs/latest/themes>
+- Pi extensions: <https://pi.dev/docs/latest/extensions>
+- Pi packages: <https://pi.dev/docs/latest/packages>
+- Pi settings: <https://pi.dev/docs/latest/settings>
 - Node.js: <https://nodejs.org/en/download>
 - Herdr: <https://herdr.dev/docs/>
+- Быстрый старт Herdr: <https://herdr.dev/docs/quick-start/>
+- Клавиатура Herdr: <https://herdr.dev/docs/keyboard/>
+- Удалённая работа Herdr: <https://herdr.dev/docs/how-to-work/>
 - Интеграции Herdr: <https://herdr.dev/docs/integrations/>
 - pi-extensible-workflows: <https://vekexasia.github.io/pi-extensible-workflows/>
 - Herdr для workflows: <https://vekexasia.github.io/pi-extensible-workflows/herdr.html>
@@ -414,5 +564,10 @@ herdr server stop
 - Архивный GTK3 Vala sample GNOME: <https://wiki.gnome.org/Projects/Vala/GTKSample>
 - Видео пользователя (дополнительный обзор):
   <https://www.youtube.com/watch?v=qAiivspEHmU>
+- Alejandro AO, «Pi Agent – Crash Course | Minimal Coding Agent»
+  (дополнительный обзор): <https://www.youtube.com/watch?v=N30XGyPrr6I>
+  Тема по metadata автора: 0:51 — Pi; 3:46 — models; 5:28 — custom prompts;
+  8:05 — skills; 11:26 — themes; 13:17 — context files; 15:13 — extensions;
+  20:32 — packages; 22:02 — sessions.
 
 Официальная документация — источник истины; видео служит дополнением.
