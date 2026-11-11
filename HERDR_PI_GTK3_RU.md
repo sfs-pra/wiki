@@ -144,6 +144,15 @@ herdr pane layout --current
 herdr pane resize --direction right --amount 0.1 --current
 ```
 
+### herdr --remote и буфер обмена
+
+Для работы буфера обмена нужно запустить от пользователя рабочего стола (не от root) :
+```bash
+herdr --remote  ssh://user@host:port
+```
+После чего выделение мышью в окне herdr (появится сообщение "copied to clipboard") можно вставить в окно herdr и приложения на рабочем столе : Ctrl+Shift+v
+Буфер обмена рабочего стола в herdr : Shift+Ins
+
 ## Установка workflow-пакетов
 
 Следующие команды являются командами CLI в **обычной оболочке**, а не текстом
