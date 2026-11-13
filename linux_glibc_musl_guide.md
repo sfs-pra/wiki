@@ -56,6 +56,32 @@ strings ./имя_бинарника | grep -oE '^GLIBC_[0-9.]+$' | sort -Vu
 * **Команда `objdump -T ./имя_бинарника`:** для статического файла выведет `не динамический объект` (`not a dynamic object`).
 * **Команда `file ./имя_бинарника`:** покажет и процессорную архитектуру, и тип линковки (например, `ELF 64-bit LSB executable, x86-64, ..., statically linked`).
 
+#### Наглядный пример: сравнение сборок в папке `target/`
+
+В Rust артефакты складываются в разные директории в зависимости от того, был ли передан флаг `--target`. На примере одного и того же проекта (`edvirtxml`), собранного на хосте с новейшей glibc (например, Arch Linux), хорошо видна разница в требованиях:
+
+1. **Обычная сборка (`cargo build --release`)** попадает в `target/release/` и жестко привязывается к библиотекам текущей системы (вплоть до `GLIBC_2.43`):
+
+```bash
+\$ objdump -T ./target/release/edvirtxml | grep -oE 'GLIBC_[0-9.]+' | sort -Vu
+GLIBC_2.2.5
+...
+GLIBC_2.39
+GLIBC_2.43
+```
+
+2. **Сборка с целевой версией (`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17`)** попадает в подпапку `target/x86_64-unknown-linux-gnu/release/` и ограничивает требования уровнем CentOS 7 / RHEL 7:
+
+```bash
+\$ objdump -T ./target/x86_64-unknown-linux-gnu/release/edvirtxml | grep -oE 'GLIBC_[0-9.]+' | sort -Vu
+GLIBC_2.2.5
+...
+GLIBC_2.16
+GLIBC_2.17
+```
+
+> **Важно при деплое:** При использовании флага `--target` забирайте готовый бинарник строго из `target/<triple>/release/`, а не из корневой `target/release/`, иначе на сервере останется старая версия файла с привязкой к свежей glibc.
+
 ---
 
 ## 3. Сравнение подходов: свежий glibc, старый glibc и musl
