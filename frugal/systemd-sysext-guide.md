@@ -1,155 +1,219 @@
-# Руководство по использованию `systemd-sysext` в Arch Linux и Debian
+# `systemd-sysext` и `systemd-confext` в Arch Linux и Debian: руководство с проверкой на практике
+
+Что проверено, а что взято из документации, отмечено явно. Проверки: systemd 262, Arch Linux
+(сборка puZZle 2611), виртуальная машина QEMU; установленная система на ext4 и live-система с
+корнем на aufs.
 
 ## Содержание
 
-- [1. Принципы работы `systemd-sysext`](#1-принципы-работы-systemd-sysext)
-  - [Основные понятия](#основные-понятия)
-  - [Требования к структуре образа](#требования-к-структуре-образа)
-- [2. Совместимость версий и параметр `SYSEXT_LEVEL`](#2-совместимость-версий-и-параметр-sysext_level)
-  - [Как `systemd-sysext` проверяет совместимость](#как-systemd-sysext-проверяет-совместимость)
-  - [Особенности в Arch Linux (`SYSEXT_LEVEL=1`)](#особенности-в-arch-linux-sysext_level1)
-  - [Особенности в Debian (`VERSION_ID`)](#особенности-в-debian-version_id)
-  - [Универсальный вариант (`ID=_any`)](#универсальный-вариант-id_any)
-- [3. Базовый рабочий процесс (ручная сборка)](#3-базовый-рабочий-процесс-ручная-сборка)
-  - [Подготовка структуры и метаданных](#подготовка-структуры-и-метаданных)
-  - [Сборка SquashFS-образа](#сборка-squashfs-образа)
-  - [Подключение и отключение](#подключение-и-отключение)
-- [4. Упаковка GUI-приложений (на примере `galculator`)](#4-упаковка-gui-приложений-на-примере-galculator)
-  - [Особенности GUI-модулей](#особенности-gui-модулей)
-  - [Автоматическая сборка для Arch Linux (`build-sysext-arch.sh`)](#автоматическая-сборка-для-arch-linux-build-sysext-archsh)
-  - [Автоматическая сборка для Debian (`build-sysext-debian.sh`)](#автоматическая-сборка-для-debian-build-sysext-debiansh)
-- [5. Удобный скрипт-переключатель (`sysext-toggle`)](#5-удобный-скрипт-переключатель-sysext-toggle)
-  - [Код скрипта](#код-скрипта)
-  - [Примеры использования](#примеры-использования)
-- [6. Настройка автодополнения (`Tab`)](#6-настройка-автодополнения-tab)
-  - [Для Bash](#для-bash)
-  - [Для Zsh](#для-zsh)
-- [7. Важные нюансы и ограничения](#7-важные-нюансы-и-ограничения)
+- [1. Как это работает](#1-как-это-работает)
+- [2. Совместимость: файл `extension-release`](#2-совместимость-файл-extension-release)
+- [3. Только чтение и режим `--mutable`](#3-только-чтение-и-режим---mutable)
+- [4. Ручная сборка и подключение](#4-ручная-сборка-и-подключение)
+- [5. `/etc` и `/var`: confext и копирование](#5-etc-и-var-confext-и-копирование)
+- [6. Кэши, службы, пользователи](#6-кэши-службы-пользователи)
+- [7. Упаковка GUI-приложений (на примере `galculator`)](#7-упаковка-gui-приложений-на-примере-galculator)
+- [8. Скрипт-переключатель `sysext-toggle`](#8-скрипт-переключатель-sysext-toggle)
+- [9. Подключение при загрузке](#9-подключение-при-загрузке)
+- [10. Модуль внутри пакета pacman (`.pkg.tar`)](#10-модуль-внутри-пакета-pacman-pkgtar)
+- [11. Live-системы (frugal, aufs/overlayfs)](#11-live-системы-frugal-aufsoverlayfs)
+- [12. Автодополнение (`Tab`)](#12-автодополнение-tab)
+- [13. Ограничения](#13-ограничения)
 
 ---
 
-## 1. Принципы работы `systemd-sysext`
+## 1. Как это работает
 
-**`systemd-sysext` (System Extension Images)** — это механизм в составе `systemd`, предназначенный для динамического расширения неизменяемых (immutable) или стандартных систем без перезагрузки и модификации базовой файловой системы.
+**`systemd-sysext`** накладывает образы-расширения поверх `/usr` и `/opt` через OverlayFS.
+**`systemd-confext`** делает то же самое для `/etc`.
 
-### Основные понятия
-* **Форматы образов:** Поддерживаются raw-образы дисков (GPT, опционально с dm-verity), чистые образы файловых систем **SquashFS** и **EROFS** (обычно с расширением `.raw`), а также обычные директории.
-* **Точки монтирования:** Образы накладываются поверх `/usr` и `/opt` с помощью **OverlayFS** в режиме «только для чтения» (`read-only`). Для аналогичной работы с `/etc` используется утилита `systemd-confext`.
-* **Директории поиска:** По умолчанию `systemd-sysext` ищет расширения в `/etc/extensions/`, `/run/extensions/` и `/var/lib/extensions/`.
-* **Динамическое управление:** Команда `systemd-sysext refresh` на лету пересобирает слои OverlayFS при добавлении или удалении образов.
+- **Форматы образов:** каталог, образ GPT (по желанию с dm-verity), «голая» файловая система
+  SquashFS, EROFS или ext4 в файле `*.raw`.
+- **Где ищутся:** sysext — `/etc/extensions/`, `/run/extensions/`, `/var/lib/extensions/`;
+  confext — `/run/confexts/`, `/var/lib/confexts/`, `/usr/lib/confexts/`,
+  `/usr/local/lib/confexts/`. Каталог в этих местах — тоже расширение, поэтому туда можно
+  положить символическую ссылку на смонтированный каталог (см. разделы 10 и 11).
+- **Что попадает в систему:** sysext — только `/usr` и `/opt`; confext — только `/etc`. Файлы
+  образа в `/var` и других местах игнорируются (проверено: записи pacman из
+  `/var/lib/pacman/local` образа не видны).
+- **`refresh`** снимает overlay и собирает его заново **со всеми** расширениями сразу; на короткое
+  время пропадают файлы всех расширений, а не только изменённого.
+- **Включать/выключать отдельный образ** нечем: подключается всё, что лежит в каталогах поиска.
+  Отключить — убрать образ (или пустой каталог с тем же именем в `/etc/extensions/` для маскировки).
 
-### Требования к структуре образа
-1. **Иерархия каталогов:** Файлы внутри образа должны находиться в директориях `/usr/...` или `/opt/...` (корень образа соответствует корню системы `/`).
-2. **Файл метаданных:** Внутри образа обязательно должен присутствовать файл `/usr/lib/extension-release.d/extension-release.<ИМЯ_ОБРАЗА>`, где `<ИМЯ_ОБРАЗА>` строго совпадает с именем `.raw`-файла без расширения.
-3. **Права доступа:** Владельцем образа `.raw` и директории `/var/lib/extensions` должен быть `root:root`, а права на запись для других пользователей должны отсутствовать (`chmod 644`).
+Требования к образу:
 
----
-
-## 2. Совместимость версий и параметр `SYSEXT_LEVEL`
-
-### Как `systemd-sysext` проверяет совместимость
-Перед подключением образа `systemd-sysext` сверяет файл метаданных `extension-release.<ИМЯ>` внутри образа с файлом `/etc/os-release` хост-системы. Это защищает систему от подключения бинарно несовместимых библиотек от другой ОС или другого релиза.
-
-### Особенности в Arch Linux (`SYSEXT_LEVEL=1`)
-Arch Linux использует модель rolling release, поэтому в его `/etc/os-release` **отсутствует поле `VERSION_ID`**. 
-
-Если указать в `extension-release` только `ID=arch`, утилита `systemd-sysext` может отклонить образ из-за отсутствия привязки к версии/уровню совместимости. Чтобы явно обозначить уровень совместимости, используется параметр `SYSEXT_LEVEL`:
-
-```ini
-ID=arch
-SYSEXT_LEVEL=1
-```
-
-**Как это работает:**
-* `SYSEXT_LEVEL` — это произвольный строковый или числовой идентификатор уровня совместимости (например, `1`, `2` или дата сборки `2026.11`).
-* Если в `/etc/os-release` хоста не задан свой `SYSEXT_LEVEL`, `systemd-sysext` принимает любой образ с совпадающим `ID=arch` и наличием поля `SYSEXT_LEVEL`.
-* Если же вы вручную добавите `SYSEXT_LEVEL=2` в `/etc/os-release` хоста, система начнёт принимать только те модули, у которых указан `SYSEXT_LEVEL=2`, отсеивая устаревшие сборки.
-
-### Особенности в Debian (`VERSION_ID`)
-Debian имеет фиксированные релизы, и в его `/etc/os-release` всегда присутствуют оба поля (например, `ID=debian` и `VERSION_ID="12"` или `"13"`). Поэтому для Debian в файле метаданных достаточно указать точное совпадение с хостом:
-
-```ini
-ID=debian
-VERSION_ID=12
-```
-
-### Универсальный вариант (`ID=_any`)
-Если модуль содержит полностью статически слинкованные бинарники (на Go, Rust или AppImage), которые не зависят от системных библиотек (`glibc`, `openssl` и др.), проверку дистрибутива можно отключить:
-
-```ini
-ID=_any
-```
+1. корень образа соответствует корню системы: файлы в `usr/...`, `opt/...` (для confext — `etc/...`);
+2. файл `usr/lib/extension-release.d/extension-release.ИМЯ` (для confext —
+   `etc/extension-release.d/extension-release.ИМЯ`), где `ИМЯ` совпадает с именем образа без
+   `.raw`;
+3. образ и каталоги принадлежат root и не доступны на запись другим.
 
 ---
 
-## 3. Базовый рабочий процесс (ручная сборка)
+## 2. Совместимость: файл `extension-release`
 
-### Подготовка структуры и метаданных
-Создайте рабочую директорию и поместите туда нужные файлы:
+Перед подключением `ID=` из `extension-release` сравнивается с `/etc/os-release`. По документации:
+если `ID` не `_any`, должен совпасть `SYSEXT_LEVEL=` (если задан), иначе `VERSION_ID=`. Для
+confext — `CONFEXT_LEVEL=`/`VERSION_ID=`.
 
-```bash
-mkdir -p mytools/usr/bin
-mkdir -p mytools/usr/lib/extension-release.d
+- **Debian** — фиксированные релизы, в `os-release` есть `VERSION_ID`:
+  ```ini
+  ID=debian
+  VERSION_ID=12
+  ```
+- **Arch Linux** — rolling, `VERSION_ID` нет. Вариант из документации — уровень совместимости:
+  ```ini
+  ID=arch
+  SYSEXT_LEVEL=1
+  ```
+  Добавив `SYSEXT_LEVEL=2` в `/etc/os-release` хоста, можно отсечь старые образы. *Этот вариант на
+  Arch без `VERSION_ID` мы не проверяли.*
+- **Без проверки** (проверено):
+  ```ini
+  ID=_any
+  ```
+  Подходит для статических программ и для образов, собранных под ту же систему, — ответственность за
+  совместимость библиотек на вас.
 
-# Поместите ваши бинарники в mytools/usr/bin/
+Полезные поля (из документации; `EXTENSION_RELOAD_MANAGER` проверен):
 
-# Создайте файл метаданных (для Arch Linux)
-cat << 'EOF' > mytools/usr/lib/extension-release.d/extension-release.mytools
-ID=arch
-SYSEXT_LEVEL=1
-EOF
+```ini
+EXTENSION_RELOAD_MANAGER=1                     # daemon-reload после merge/refresh/unmerge
+EXTENSION_RESTART_UNITS="my.service"           # перезапустить юниты (подразумевает reload)
+EXTENSION_RELOAD_OR_RESTART_UNITS="other.service"
+ARCHITECTURE=x86-64
 ```
 
-### Сборка SquashFS-образа
-Установите пакет `squashfs-tools` (`pacman -S squashfs-tools` в Arch или `apt install squashfs-tools` в Debian) и соберите образ:
+---
 
-```bash
-mksquashfs mytools mytools.raw -noappend -comp zstd -all-root
+## 3. Только чтение и режим `--mutable`
+
+**По умолчанию, пока подключено хотя бы одно расширение, `/usr` и `/opt` (а с confext — `/etc`)
+доступны только для чтения — даже на обычной системе с записываемым корнем.** Проверено:
+
 ```
-*(Флаг `-all-root` автоматически назначает владельцем всех файлов внутри образа `root:root`).*
+touch /usr/share/test           → Read-only file system
+gtk-update-icon-cache …         → Failed to open file …: Read-only file system
+update-desktop-database …       → could not be updated
+```
 
-### Подключение и отключение
+То есть в режиме по умолчанию не работают ни установка пакетов, ни обновление кэшей после
+подключения (в т. ч. то, что предлагала прежняя версия этой статьи).
+
+С systemd 256 есть `--mutable=` (`Mutable=` в `sysext.conf`):
+
+| Режим | Что происходит |
+|---|---|
+| `no` (по умолчанию) | только чтение |
+| `auto` | запись разрешена, если есть каталог/ссылка в `/var/lib/extensions.mutable/` |
+| `yes` | то же, каталоги создаются сами |
+| `ephemeral` | запись во временный каталог, пропадает после `unmerge` |
+| `import`, `ephemeral-import` | варианты с подмешиванием `/var/lib/extensions.mutable/` |
+
+Чтобы запись шла **в настоящие каталоги**, как без расширений, нужны ссылки:
 
 ```bash
-# Подключение
+sudo mkdir -p /var/lib/extensions.mutable
+sudo ln -s /usr /var/lib/extensions.mutable/usr
+sudo ln -s /opt /var/lib/extensions.mutable/opt
+sudo ln -s /etc /var/lib/extensions.mutable/etc   # для confext
+sudo systemd-sysext refresh --mutable=auto
+```
+
+Проверено на ext4: overlay получает `upperdir=/usr`; запись в `/usr`, `gtk-update-icon-cache`,
+`update-desktop-database`, `ldconfig`, `pacman -U` работают, записанное остаётся после
+`unmerge`. Файлы самих расширений в `/usr` не копируются.
+
+На корне aufs или overlayfs (live-системы) такой режим **не работает**: ядро не принимает их как
+слой записи (`overlayfs: upper fs missing required features`, `Failed to merge hierarchies`).
+`ephemeral` там работает, но всё записанное пропадает при отключении.
+
+---
+
+## 4. Ручная сборка и подключение
+
+```bash
+mkdir -p mytools/usr/bin mytools/usr/lib/extension-release.d
+# бинарники — в mytools/usr/bin/
+printf 'ID=arch\nSYSEXT_LEVEL=1\n' > mytools/usr/lib/extension-release.d/extension-release.mytools
+mksquashfs mytools mytools.raw -noappend -comp zstd -all-root   # -all-root: владелец root
+```
+
+Подключение и отключение:
+
+```bash
 sudo mkdir -p /var/lib/extensions
 sudo mv mytools.raw /var/lib/extensions/
-sudo systemctl enable --now systemd-sysext.service
-sudo systemd-sysext refresh
-
-# Проверка статуса
+sudo systemctl enable systemd-sysext.service          # подключать при загрузке
+sudo systemd-sysext refresh --mutable=auto            # подключить сейчас (см. раздел 3)
 systemd-sysext status
 
-# Временное отключение конкретного модуля
 sudo mv /var/lib/extensions/mytools.raw /var/lib/extensions/mytools.raw.disabled
-sudo systemd-sysext refresh
-
-# Полное отключение всех модулей
-sudo systemd-sysext unmerge
+sudo systemd-sysext refresh --mutable=auto            # без этого образа
+sudo systemd-sysext unmerge                           # снять все
 ```
 
----
-
-## 4. Упаковка GUI-приложений (на примере `galculator`)
-
-### Особенности GUI-модулей
-Чтобы графическое приложение появилось в меню рабочего стола (GNOME, KDE, XFCE и др.) сразу после подключения `.raw`-образа без перезагрузки сессии, необходимо:
-1. Убедиться, что внутри образа присутствуют ярлык `/usr/share/applications/*.desktop` и иконки в `/usr/share/icons/hicolor/...`.
-2. После вызова `systemd-sysext refresh` обновить системные кэши ярлыков и иконок:
-   ```bash
-   sudo update-desktop-database /usr/share/applications
-   sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor
-   ```
-
-В качестве примера ниже используется лёгкий инженерный калькулятор **`galculator`** — он не требует прав `root` или настройки Polkit и запускается от обычного пользователя сразу после подключения модуля.
+Время на установленной системе: `refresh` с двумя расширениями — около 0,02 с; основное время
+уходит на кэши (раздел 6).
 
 ---
+
+## 5. `/etc` и `/var`: confext и копирование
+
+- **`/etc`** — `systemd-confext`. Тот же образ можно подключить и как sysext, и как confext, если в
+  нём есть оба `extension-release` (`usr/lib/extension-release.d/…` и `etc/extension-release.d/…`).
+  confext монтирует `/etc` с `noexec`; для скриптов в `/etc` нужен `--noexec=false`. Проверено:
+  `systemd-confext refresh --mutable=auto --noexec=false` с `/var/lib/extensions.mutable/etc` →
+  `/etc` — файлы модуля видны, запись в `/etc` работает.
+- **`/var`** не подключается ничем. Рабочий способ — скопировать при подключении только то, чего
+  нет в системе, запомнить список с контрольными суммами и при отключении удалить неизменённое.
+  Так в систему попадают, например, записи `/var/lib/pacman/local`, и `pacman -Q` видит пакеты
+  модуля (проверено).
+
+---
+
+## 6. Кэши, службы, пользователи
+
+sysext не делает того, что при загрузке делают службы systemd. После `merge`/`refresh`/`unmerge`
+(в режиме `--mutable`) нужно самому:
+
+```bash
+systemctl daemon-reload               # или EXTENSION_RELOAD_MANAGER=1
+systemd-sysusers                      # пользователи из usr/lib/sysusers.d
+systemd-tmpfiles --create
+udevadm control --reload
+busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
+ldconfig
+# и только то, что затрагивает модуль:
+depmod -a "$(uname -r)"                                   # usr/lib/modules
+update-desktop-database -q /usr/share/applications        # ярлыки
+PKGSYSTEM_ENABLE_FSYNC=0 update-mime-database /usr/share/mime
+glib-compile-schemas /usr/share/glib-2.0/schemas
+gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor
+fc-cache -s
+```
+
+- `update-mime-database` без `PKGSYSTEM_ENABLE_FSYNC=0` (так его зовёт хук pacman) на медленном
+  диске занял 54 с; с этой переменной подключение двух модулей вместе со всеми шагами — 2,3 с.
+- После `unmerge` кэши, собранные при подключённом модуле, устаревают — их тоже нужно обновить.
+- `gtk-update-icon-cache` из GTK4 пишет `icon-theme.cache` (без точки).
+- Юниты из `*.wants` модуля сами не запускаются: `systemctl start --no-block ЮНИТ` после
+  подключения, `systemctl stop` — до отключения.
+
+---
+
+## 7. Упаковка GUI-приложений (на примере `galculator`)
+
+Чтобы приложение появилось в меню без перезапуска сеанса, в образе должны быть
+`usr/share/applications/*.desktop` и иконки, а после `refresh` — обновление кэшей (раздел 6),
+что возможно только в режиме `--mutable` (раздел 3).
 
 ### Автоматическая сборка для Arch Linux (`build-sysext-arch.sh`)
 
-Скрипт скачивает пакет и **только те зависимости, которых ещё нет** в вашей хост-системе, распаковывает их и собирает `.raw`-образ.
-
-Сохраните как `build-sysext-arch.sh` и выполните `chmod +x build-sysext-arch.sh`:
+Скачивает пакет и **только недостающие** зависимости, распаковывает, собирает `.raw`. *Скрипт целиком не проверялся.*
+Базы пакетов обновите заранее полным `pacman -Syu`: `pacman -Sy` без обновления системы — частичное
+обновление, которое Arch не поддерживает.
 
 ```bash
 #!/usr/bin/env bash
@@ -158,61 +222,42 @@ set -euo pipefail
 PKG_NAME="${1:-galculator}"
 EXT_NAME="${2:-$PKG_NAME}"
 WORK_DIR=$(mktemp -d -t sysext-arch-XXXXXX)
-
-cleanup() {
-    sudo rm -rf "$WORK_DIR"
-}
-trap cleanup EXIT
+trap 'sudo rm -rf "$WORK_DIR"' EXIT
 
 for cmd in pacman mksquashfs tar; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "Ошибка: не найдена утилита '$cmd'. Установите squashfs-tools."
-        exit 1
-    fi
+    command -v "$cmd" &>/dev/null || { echo "Ошибка: нет '$cmd' (squashfs-tools?)"; exit 1; }
 done
 
 mkdir -p "$WORK_DIR/pkgs" "$WORK_DIR/rootfs"
 
-echo "==> Скачивание $PKG_NAME и недостающих в системе зависимостей..."
-sudo pacman -Syw --cachedir "$WORK_DIR/pkgs" --noconfirm "$PKG_NAME"
+echo "==> Скачивание $PKG_NAME и недостающих зависимостей..."
+sudo pacman -Sw --cachedir "$WORK_DIR/pkgs" --noconfirm "$PKG_NAME"
 
-echo "==> Распаковка пакетов в rootfs..."
+echo "==> Распаковка..."
 for pkg in "$WORK_DIR"/pkgs/*.pkg.tar*; do
     [ -e "$pkg" ] || continue
-    echo "    Распаковка $(basename "$pkg")..."
-    sudo tar -xf "$pkg" -C "$WORK_DIR/rootfs"         --exclude='.BUILDINFO'         --exclude='.MTREE'         --exclude='.PKGINFO'         --exclude='.INSTALL'
+    sudo tar -xf "$pkg" -C "$WORK_DIR/rootfs" \
+        --exclude='.BUILDINFO' --exclude='.MTREE' --exclude='.PKGINFO' --exclude='.INSTALL'
 done
 
-echo "==> Очистка директорий вне /usr и /opt..."
-sudo find "$WORK_DIR/rootfs" -mindepth 1 -maxdepth 1 ! -name 'usr' ! -name 'opt' -exec rm -rf {} +
+# sysext видит только /usr и /opt; /etc пакета (правила D-Bus, polkit, конфиги) понадобится
+# отдельный confext-образ (раздел 5), /var — копирование
+echo "==> Удаление всего вне /usr и /opt..."
+sudo find "$WORK_DIR/rootfs" -mindepth 1 -maxdepth 1 ! -name usr ! -name opt -exec rm -rf {} +
 
-echo "==> Создание метаданных extension-release..."
 sudo mkdir -p "$WORK_DIR/rootfs/usr/lib/extension-release.d"
-sudo tee "$WORK_DIR/rootfs/usr/lib/extension-release.d/extension-release.${EXT_NAME}" > /dev/null <<EOF
-ID=arch
-SYSEXT_LEVEL=1
-EOF
+printf 'ID=arch\nSYSEXT_LEVEL=1\n' |
+    sudo tee "$WORK_DIR/rootfs/usr/lib/extension-release.d/extension-release.${EXT_NAME}" >/dev/null
 
-OUTPUT_FILE="${EXT_NAME}.raw"
-echo "==> Сборка SquashFS-образа: ${OUTPUT_FILE}..."
-sudo mksquashfs "$WORK_DIR/rootfs" "$OUTPUT_FILE" -noappend -comp zstd -all-root
-sudo chown "$USER:$USER" "$OUTPUT_FILE"
-
-echo "==> Готово! Образ сохранён как ${OUTPUT_FILE}"
+sudo mksquashfs "$WORK_DIR/rootfs" "${EXT_NAME}.raw" -noappend -comp zstd -all-root
+sudo chown "$USER:$USER" "${EXT_NAME}.raw"
+echo "==> Готово: ${EXT_NAME}.raw"
 ```
-
-**Запуск:**
-```bash
-./build-sysext-arch.sh galculator
-```
-
----
 
 ### Автоматическая сборка для Debian (`build-sysext-debian.sh`)
 
-В Debian для скачивания пакета вместе с отсутствующими зависимостями используется `apt-get install --download-only`, а распаковка `.deb`-архивов выполняется через `dpkg-deb -x`. Также скрипт автоматически подставляет `ID` и `VERSION_ID` из вашего `/etc/os-release`.
-
-Сохраните как `build-sysext-debian.sh` и выполните `chmod +x build-sysext-debian.sh`:
+`apt-get install --download-only` скачивает пакет с отсутствующими зависимостями, `dpkg-deb -x`
+распаковывает; `ID` и `VERSION_ID` берутся из `/etc/os-release`. *Скрипт не проверялся.*
 
 ```bash
 #!/usr/bin/env bash
@@ -221,34 +266,22 @@ set -euo pipefail
 PKG_NAME="${1:-galculator}"
 EXT_NAME="${2:-$PKG_NAME}"
 WORK_DIR=$(mktemp -d -t sysext-deb-XXXXXX)
-
-cleanup() {
-    sudo rm -rf "$WORK_DIR"
-}
-trap cleanup EXIT
+trap 'sudo rm -rf "$WORK_DIR"' EXIT
 
 for cmd in apt-get dpkg-deb mksquashfs; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "Ошибка: не найдена утилита '$cmd'. Установите squashfs-tools."
-        exit 1
-    fi
+    command -v "$cmd" &>/dev/null || { echo "Ошибка: нет '$cmd'"; exit 1; }
 done
 
 mkdir -p "$WORK_DIR/pkgs" "$WORK_DIR/rootfs"
-
-echo "==> Обновление индексов и скачивание $PKG_NAME с недостающими зависимостями..."
 sudo apt-get update -qq
-sudo apt-get install --download-only --yes     -o Dir::Cache::archives="$WORK_DIR/pkgs"     "$PKG_NAME"
+sudo apt-get install --download-only --yes -o Dir::Cache::archives="$WORK_DIR/pkgs" "$PKG_NAME"
 
-echo "==> Распаковка .deb пакетов в rootfs..."
 for deb in "$WORK_DIR"/pkgs/*.deb; do
     [ -e "$deb" ] || continue
-    echo "    Распаковка $(basename "$deb")..."
     sudo dpkg-deb -x "$deb" "$WORK_DIR/rootfs"
 done
 
-# В современных версиях Debian (12+) действует usrmerge (/bin -> /usr/bin, /lib -> /usr/lib).
-# Если старый пакет содержит файлы в корневых /bin или /lib, переносим их в /usr.
+# usrmerge (Debian 12+): старые /bin, /lib — в /usr
 for dir in bin sbin lib lib64; do
     if [[ -d "$WORK_DIR/rootfs/$dir" && ! -L "$WORK_DIR/rootfs/$dir" ]]; then
         sudo mkdir -p "$WORK_DIR/rootfs/usr/$dir"
@@ -257,180 +290,204 @@ for dir in bin sbin lib lib64; do
     fi
 done
 
-echo "==> Очистка директорий вне /usr и /opt..."
-sudo find "$WORK_DIR/rootfs" -mindepth 1 -maxdepth 1 ! -name 'usr' ! -name 'opt' -exec rm -rf {} +
+sudo find "$WORK_DIR/rootfs" -mindepth 1 -maxdepth 1 ! -name usr ! -name opt -exec rm -rf {} +
 
-# Считываем ID и VERSION_ID из /etc/os-release текущей системы
 OS_ID=$(. /etc/os-release && echo "${ID:-debian}")
 OS_VER=$(. /etc/os-release && echo "${VERSION_ID:-}")
-
-echo "==> Создание метаданных extension-release (ID=$OS_ID, VERSION_ID=$OS_VER)..."
 sudo mkdir -p "$WORK_DIR/rootfs/usr/lib/extension-release.d"
-{
-    echo "ID=${OS_ID}"
-    [[ -n "$OS_VER" ]] && echo "VERSION_ID=${OS_VER}"
-} | sudo tee "$WORK_DIR/rootfs/usr/lib/extension-release.d/extension-release.${EXT_NAME}" > /dev/null
+{ echo "ID=${OS_ID}"; [[ -n "$OS_VER" ]] && echo "VERSION_ID=${OS_VER}"; } |
+    sudo tee "$WORK_DIR/rootfs/usr/lib/extension-release.d/extension-release.${EXT_NAME}" >/dev/null
 
-OUTPUT_FILE="${EXT_NAME}.raw"
-echo "==> Сборка SquashFS-образа: ${OUTPUT_FILE}..."
-sudo mksquashfs "$WORK_DIR/rootfs" "$OUTPUT_FILE" -noappend -comp zstd -all-root
-sudo chown "$USER:$USER" "$OUTPUT_FILE"
-
-echo "==> Готово! Образ сохранён как ${OUTPUT_FILE}"
-```
-
-**Запуск:**
-```bash
-./build-sysext-debian.sh galculator
+sudo mksquashfs "$WORK_DIR/rootfs" "${EXT_NAME}.raw" -noappend -comp zstd -all-root
+sudo chown "$USER:$USER" "${EXT_NAME}.raw"
+echo "==> Готово: ${EXT_NAME}.raw"
 ```
 
 ---
 
-## 5. Удобный скрипт-переключатель (`sysext-toggle`)
+## 8. Скрипт-переключатель `sysext-toggle`
 
-Этот универсальный скрипт (подходит и для Arch Linux, и для Debian) позволяет одной командой включать или отключать выбранный `.raw` модуль и автоматически обновляет кэш иконок и меню рабочего стола.
-
-### Код скрипта
-Сохраните код в `/usr/local/bin/sysext-toggle` и сделайте исполняемым (`sudo chmod +x /usr/local/bin/sysext-toggle`):
+Включает/выключает `.raw`-модуль, подключает в режиме `--mutable` (иначе обновить кэши нельзя) и
+обновляет кэши. Сохраните в `/usr/local/bin/sysext-toggle`, `chmod +x`.
+*Команды из скрипта проверены по отдельности, сам скрипт целиком — нет.*
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXT_DIR="/var/lib/extensions"
+EXT_DIR=/var/lib/extensions
+MUT=/var/lib/extensions.mutable
 
-if [[ $EUID -ne 0 ]]; then
-    exec sudo "$0" "$@"
-fi
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+mkdir -p "$EXT_DIR" "$MUT"
+# запись — в настоящие /usr и /opt (раздел 3)
+for d in usr opt; do [[ -e $MUT/$d ]] || ln -s "/$d" "$MUT/$d"; done
 
-mkdir -p "$EXT_DIR"
-
-update_desktop_caches() {
-    echo "==> Обновление кэша меню и иконок..."
-    if command -v update-desktop-database &>/dev/null; then
-        update-desktop-database /usr/share/applications 2>/dev/null || true
+refresh() {
+    if compgen -G "$EXT_DIR/*.raw" >/dev/null; then
+        systemd-sysext refresh --mutable=auto
+    else
+        systemd-sysext unmerge
     fi
-    if command -v gtk-update-icon-cache &>/dev/null; then
-        gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
-    fi
+}
+
+update_caches() {
+    echo "==> Обновление кэшей..."
     systemctl daemon-reload
+    ldconfig
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+    PKGSYSTEM_ENABLE_FSYNC=0 update-mime-database /usr/share/mime 2>/dev/null || true
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
 }
 
 show_status() {
-    echo "=== Доступные модули в $EXT_DIR ==="
     shopt -s nullglob
-    local found=0
+    local f found=0
+    echo "=== Модули в $EXT_DIR ==="
     for f in "$EXT_DIR"/*.raw "$EXT_DIR"/*.raw.disabled; do
         found=1
-        local base
-        base=$(basename "$f")
-        if [[ "$base" == *.raw ]]; then
-            echo "  [ВКЛ]  ${base%.raw}"
-        else
-            echo "  [ВЫКЛ] ${base%.raw.disabled}"
-        fi
+        f=$(basename "$f")
+        if [[ $f == *.raw ]]; then echo "  [ВКЛ]  ${f%.raw}"; else echo "  [ВЫКЛ] ${f%.raw.disabled}"; fi
     done
-    if [[ $found -eq 0 ]]; then
-        echo "  (модули не найдены)"
-    fi
-    echo ""
+    ((found)) || echo "  (модули не найдены)"
+    echo
     systemd-sysext status
 }
 
 toggle_module() {
-    local name="$1"
-    local active_file="$EXT_DIR/${name}.raw"
-    local disabled_file="$EXT_DIR/${name}.raw.disabled"
-
-    if [[ -f "$active_file" ]]; then
-        echo "==> Отключение модуля: $name"
-        mv "$active_file" "$disabled_file"
-        systemd-sysext refresh
-        update_desktop_caches
-        echo "==> Модуль '$name' отключен."
-    elif [[ -f "$disabled_file" ]]; then
-        echo "==> Включение модуля: $name"
-        mv "$disabled_file" "$active_file"
-        systemd-sysext refresh
-        update_desktop_caches
-        echo "==> Модуль '$name' подключен."
+    local name=$1 on="$EXT_DIR/$1.raw" off="$EXT_DIR/$1.raw.disabled"
+    if [[ -f $on ]]; then
+        mv "$on" "$off"; refresh; update_caches; echo "==> '$name' отключён."
+    elif [[ -f $off ]]; then
+        mv "$off" "$on"; refresh; update_caches; echo "==> '$name' подключён."
     else
-        echo "Ошибка: модуль '$name' не найден в $EXT_DIR"
-        exit 1
+        echo "Ошибка: модуль '$name' не найден в $EXT_DIR" >&2; exit 1
     fi
 }
 
 case "${1:-status}" in
-    status|list)
-        show_status
-        ;;
-    off-all)
-        echo "==> Отмонтирование всех sysext-слоёв..."
-        systemd-sysext unmerge
-        update_desktop_caches
-        ;;
-    on-all)
-        echo "==> Монтирование всех активных sysext-слоёв..."
-        systemd-sysext refresh
-        update_desktop_caches
-        ;;
-    *)
-        toggle_module "$1"
-        ;;
+    status|list) show_status ;;
+    off-all) systemd-sysext unmerge; update_caches ;;
+    on-all) refresh; update_caches ;;
+    *) toggle_module "$1" ;;
 esac
 ```
 
-### Примеры использования
+Примеры:
 
 ```bash
-# Скопировать собранный образ в каталог расширений
 sudo cp galculator.raw /var/lib/extensions/
-
-# Включить или отключить модуль galculator (переключатель)
-sysext-toggle galculator
-
-# Показать список всех модулей ([ВКЛ] / [ВЫКЛ]) и статус OverlayFS
-sysext-toggle
-
-# Временно отмонтировать вообще все активные расширения (перед обновлением системы)
-sysext-toggle off-all
-
-# Вернуть все активные расширения обратно
+sysext-toggle galculator      # переключить
+sysext-toggle                 # список и статус
+sysext-toggle off-all         # снять все (например, перед крупным обновлением)
 sysext-toggle on-all
 ```
 
+Скрипт не трогает `/etc` и `/var`, не запускает службы и пользователей модуля — для этого см.
+разделы 5 и 6.
+
 ---
 
-## 6. Настройка автодополнения (`Tab`)
+## 9. Подключение при загрузке
 
-Чтобы имена модулей из `/var/lib/extensions` и команды скрипта подставлялись автоматически при нажатии `Tab`, установите конфигурацию для вашей оболочки.
+`systemd-sysext.service` (и `systemd-confext.service`) подключает образы из каталогов поиска
+**до** `sysinit.target`. Если образы надо сначала смонтировать самому (раздел 10), нужна своя
+служба с тем же порядком (порядок проверен на двух перезагрузках):
+
+```ini
+[Unit]
+Description=Mount my extension images
+DefaultDependencies=no
+Wants=modprobe@loop.service modprobe@squashfs.service modprobe@overlay.service
+After=local-fs.target modprobe@loop.service modprobe@squashfs.service modprobe@overlay.service
+Before=sysinit.target systemd-tmpfiles-setup.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/my-extensions-mount
+# systemd-sysusers.service к этому моменту уже отработал
+ExecStartPost=/usr/bin/systemd-sysusers
+
+[Install]
+WantedBy=sysinit.target
+```
+
+Подводные камни, на которые наткнулись: `Before=systemd-sysusers.service` даёт цикл зависимостей
+(`local-fs.target: Found ordering cycle`), а без `modprobe@loop` монтирование падает с «failed to
+set up loop device» — модули `loop`, `squashfs`, `overlay` ещё не загружены.
+
+---
+
+## 10. Модуль внутри пакета pacman (`.pkg.tar`)
+
+Образ SquashFS можно положить одним файлом в **несжатый** пакет pacman (`.pkg.tar`): данные элемента
+tar лежат непрерывно, и loop-устройство со смещением монтирует модуль прямо из файла пакета, без
+распаковки. pacman при этом даёт репозиторий, зависимости и скачивание. Скорость чтения из такого
+пакета и из обычного файла `.pfs` на HDD одинакова (265 МБ: 8,75–8,94 с против 8,85–9,01 с).
+
+sysext не открывает `.pkg.tar` сам — его надо смонтировать и подложить каталог:
+
+```bash
+P=pfs-rclone-2611.sf01-1-x86_64.pkg.tar
+OFF=$(python3 -c 'import sys,tarfile; print(next(m.offset_data for m in tarfile.open(sys.argv[1]) if m.name.endswith(".pfs")))' "$P")
+mkdir -p /run/my/rclone /run/my/rel/usr/lib/extension-release.d /run/my/img /run/extensions
+mount -t squashfs -o loop,ro,offset="$OFF" "$P" /run/my/rclone
+printf 'ID=_any\n' > /run/my/rel/usr/lib/extension-release.d/extension-release.rclone
+# файл extension-release добавляется слоем поверх модуля, сам модуль не меняется
+mount -t overlay overlay -o lowerdir=/run/my/rel:/run/my/rclone /run/my/img
+ln -s /run/my/img /run/extensions/rclone
+systemd-sysext refresh --mutable=auto
+```
+
+Проверено: `rclone version` работает. Полная реализация (sysext + confext, копия `/var`, кэши,
+службы, служба загрузки) — утилита `pfsext` из puZZle: подключение двух модулей — 2,3 с,
+отключение — 1,3 с.
+
+---
+
+## 11. Live-системы (frugal, aufs/overlayfs)
+
+На live-системе с корнем на aufs/overlayfs sysext подключается (проверено), но:
+
+- без `--mutable` `/usr` становится только для чтения — ломаются pacman и кэши;
+- `--mutable=yes` с записью в `/usr` не подключается: aufs/overlayfs нельзя сделать слоем записи;
+- `ephemeral` работает, но записанное пропадает при отключении;
+- `/etc` и `/var` из образа не видны, а `refresh` пересобирает overlay целиком.
+
+Объединение корня (aufs/overlayfs) sysext не заменяет — он кладёт второй overlay поверх `/usr`.
+Для live-систем удобнее штатное подключение модулей ветками объединения (например, `pfsload` из
+pfs-utils), для установленных систем — sysext в режиме `--mutable`.
+
+---
+
+## 12. Автодополнение (`Tab`)
 
 ### Для Bash
+
 ```bash
 sudo mkdir -p /usr/share/bash-completion/completions
 sudo tee /usr/share/bash-completion/completions/sysext-toggle > /dev/null << 'EOF'
 _sysext_toggle_completions() {
     local cur commands modules
     cur="${COMP_WORDS[COMP_CWORD]}"
-
     if [[ $COMP_CWORD -eq 1 ]]; then
         commands="status list off-all on-all"
         if [[ -d /var/lib/extensions ]]; then
-            modules=$(find /var/lib/extensions -maxdepth 1 \( -name "*.raw" -o -name "*.raw.disabled" \) -printf "%f
-" 2>/dev/null | sed -E 's/\.raw(\.disabled)?$//')
+            modules=$(find /var/lib/extensions -maxdepth 1 \( -name "*.raw" -o -name "*.raw.disabled" \) -printf "%f\n" 2>/dev/null | sed -E 's/\.raw(\.disabled)?$//')
         fi
         COMPREPLY=( $(compgen -W "${commands} ${modules}" -- "${cur}") )
     fi
 }
-
 complete -F _sysext_toggle_completions sysext-toggle
 EOF
-
-# Применить в текущей сессии
 source /usr/share/bash-completion/completions/sysext-toggle
 ```
 
 ### Для Zsh
+
 ```bash
 sudo mkdir -p /usr/share/zsh/site-functions
 sudo tee /usr/share/zsh/site-functions/_sysext-toggle > /dev/null << 'EOF'
@@ -444,29 +501,37 @@ _sysext-toggle() {
         'off-all:Отмонтировать все активные слои'
         'on-all:Смонтировать все активные слои'
     )
-
     if [[ -d /var/lib/extensions ]]; then
         local f
         for f in /var/lib/extensions/*.raw(N) /var/lib/extensions/*.raw.disabled(N); do
             modules+=( "${${f:t}%.raw(.disabled)#}" )
         done
     fi
-
     _describe -t commands 'команды' commands
     _describe -t modules 'модули' modules
 }
 
 _sysext-toggle "$@"
 EOF
-
-# Пересобрать кэш автодополнений в текущей сессии
 rm -f ~/.zcompdump* && compinit
 ```
 
+*Автодополнение не проверялось.*
+
 ---
 
-## 7. Важные нюансы и ограничения
+## 13. Ограничения
 
-* **Конфликты с пакетным менеджером:** Ни `pacman`, ни `dpkg`/`apt` не знают о файлах, смонтированных через `systemd-sysext`. Если вы попытаетесь установить или обновить пакет, файлы которого уже присутствуют в активном `.raw`-модуле, пакетный менеджер выдаст ошибку конфликта файлов (или попытается перезаписать `read-only` слой). Перед крупными обновлениями системы отключайте слои командой `sysext-toggle off-all`.
-* **Отсутствие конфигурации в `/etc`:** `systemd-sysext` монтирует только `/usr` и `/opt`. Файлы из `/etc` (например, системные конфиги по умолчанию или правила D-Bus/Polkit) при сборке исключаются. Если программе критически необходимы файлы в `/etc`, для них потребуется отдельный образ `systemd-confext` (`/var/lib/confexts/`).
-* **Совместимость библиотек:** В Arch Linux из-за частых обновлений системных библиотек (`glibc`, `gtk`, `qt`) старые `.raw`-образы со временем могут перестать запускаться и потребуют пересборки. В Debian в рамках одного стабильного релиза (например, Debian 12) ABI библиотек заморожен, поэтому собранные образы остаются работоспособными на протяжении всего жизненного цикла релиза.
+- **Только чтение по умолчанию** — см. раздел 3; `--mutable` нужен systemd 256+.
+- **`refresh` пересобирает всё.** Процессы, запущенные при подключённом модуле, держат старый
+  overlay: после отключения модуля его файл и loop-устройство остаются занятыми, пока эти
+  процессы работают (на практике — до перезагрузки). Файл модуля удалить можно сразу.
+  Работающая программа из отключённого модуля продолжает работать (проверено на `rclone rcd`).
+- **Пакетный менеджер не знает о файлах расширений.** Без копии `/var/lib/pacman/local`
+  (раздел 5) `pacman -Q` их не видит. Перед крупным обновлением системы расширения лучше снять.
+- **Порядок наложения** — по именам образов; удаления файлов (whiteout) — только в формате
+  overlayfs.
+- **Совместимость библиотек.** В Arch из-за частых обновлений `glibc`, `gtk`, `qt` старые образы со
+  временем перестают запускаться и требуют пересборки. В Debian в пределах релиза ABI заморожен.
+- **Нет зависимостей между образами** — документация прямо говорит, что sysext не система пакетов.
+  Зависимости дают обёртки, например модуль внутри пакета pacman (раздел 10).
